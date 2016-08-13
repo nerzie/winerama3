@@ -1,13 +1,13 @@
 from django.shortcuts import get_object_or_404, render
 from django.http import HttpResponseRedirect
-from django.contrib.auth.decorators import login_required
 from django.core.urlresolvers import reverse
-
-from .models import Review, Wine
+from django.contrib.auth.models import User
+from .models import Review, Wine, Cluster
 from .forms import ReviewForm
-
+from .suggestions import update_clusters
 import datetime
 
+from django.contrib.auth.decorators import login_required
 
 def review_list(request):
     latest_review_list = Review.objects.order_by('-pub_date')[:9]
@@ -31,7 +31,6 @@ def wine_detail(request, wine_id):
     form = ReviewForm()
     return render(request, 'reviews/wine_detail.html', {'wine': wine, 'form': form})
 
-
 @login_required
 def add_review(request, wine_id):
     wine = get_object_or_404(Wine, pk=wine_id)
@@ -47,6 +46,7 @@ def add_review(request, wine_id):
         review.comment = comment
         review.pub_date = datetime.datetime.now()
         review.save()
+        update_clusters()
         # Always return an HttpResponseRedirect after successfully dealing
         # with POST data. This prevents data from being posted twice if a
         # user hits the Back button.
@@ -61,3 +61,45 @@ def user_review_list(request, username=None):
     latest_review_list = Review.objects.filter(user_name=username).order_by('-pub_date')
     context = {'latest_review_list':latest_review_list, 'username':username}
     return render(request, 'reviews/user_review_list.html', context)
+
+
+@login_required
+def user_recommendation_list(request):
+    user = request.user.username
+    # get request user reviewed wines
+    user_reviews = Review.objects.filter(user_name=user).prefetch_related('wine')
+    user_reviews_wine_ids = set([x.wine.id for x in user_reviews])
+
+    # get request user cluster name (just the first one righ now)
+    try:
+        user_cluster_name = \
+            User.objects.get(username=user).cluster_set.first().name
+    except: # if no cluster has been assigned for a user, update clusters
+        update_clusters()
+        user_cluster_name = \
+            User.objects.get(username=user).cluster_set.first().name
+
+    # get usernames for other memebers of the cluster
+    user_cluster_other_members = \
+        Cluster.objects.get(name=user_cluster_name).users \
+            .exclude(username=user).all()
+    other_members_usernames = set([x.username for x in user_cluster_other_members])
+
+    # get reviews by those users, excluding wines reviewed by the request user
+    other_users_reviews = \
+        Review.objects.filter(user_name__in=other_members_usernames) \
+            .exclude(wine__id__in=user_reviews_wine_ids)
+    other_users_reviews_wine_ids = set([x.wine.id for x in other_users_reviews])
+
+    # then get a wine list including the previous IDs, order by rating
+    wine_list = sorted(
+        list(Wine.objects.filter(id__in=other_users_reviews_wine_ids)),
+        key=lambda x: x.average_rating,
+        reverse=True
+    )
+
+    return render(
+        request,
+        'reviews/user_recommendation_list.html',
+        {'username': user,'wine_list': wine_list}
+    )
